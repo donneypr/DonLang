@@ -3,7 +3,7 @@ Using this
 
 - To do:
 - Lexer - Completed
-- Parser 
+- Parser - need to push code
 - Interpreter
 - Power Operator
 - Variables
