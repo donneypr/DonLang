@@ -2,7 +2,7 @@ require_relative 'donlang'
 
 # Infinite loop for REPL-like behavior
 loop do
-  print 'basic > '
+  print 'DonLang > '
   text = gets.chomp
   
   # Call the run method from donlang class
@@ -10,7 +10,5 @@ loop do
 
   if error
     puts error.as_string
-  else
-    puts result
   end
 end
