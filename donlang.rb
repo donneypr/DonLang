@@ -171,7 +171,13 @@ class Lexer
     num_str = ''
     dot_count = 0
     pos_start = @pos.copy
-
+  
+    # Check for unary + or -
+    if @current_char == '-' || @current_char == '+'
+      num_str += @current_char
+      advance
+    end
+  
     while @current_char != nil && (DIGITS + '.').include?(@current_char)
       if @current_char == '.'
         break if dot_count == 1
@@ -182,13 +188,14 @@ class Lexer
       end
       advance
     end
-
+  
     if dot_count == 0
       Token.new(TT_INT, num_str.to_i, pos_start, @pos)
     else
       Token.new(TT_FLOAT, num_str.to_f, pos_start, @pos)
     end
   end
+  
 end
 
 ##################
@@ -324,11 +331,11 @@ class Parser
     if [TT_PLUS, TT_MINUS].include?(tok.type)
       op_tok = tok
       res.register(advance)  # Move past the unary operator
-      factor = res.register(factor)  # Recursively parse the factor after the unary operator
+      factor_node = res.register(factor)  # Recursively parse the factor after the unary operator
       if res.error
         return res
       end
-      return res.success(UnaryOpNode.new(op_tok, factor))  # Create a UnaryOpNode for the unary operation
+      return res.success(UnaryOpNode.new(op_tok, factor_node))  # Create a UnaryOpNode for the unary operation
   
     # Handle numbers (INT or FLOAT)
     elsif [TT_INT, TT_FLOAT].include?(tok.type)
