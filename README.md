@@ -3,8 +3,8 @@ Using this
 
 - To do:
 - Lexer - Completed
-- Parser - need to push code
-- Interpreter
+- Parser - Completed
+- Interpreter - Completed
 - Power Operator
 - Variables
 - Comparison and Logical Operators
