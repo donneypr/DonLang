@@ -5,7 +5,7 @@ Using this
 - Lexer - Completed
 - Parser - Completed
 - Interpreter - Completed
-- Power Operator
+- Power Operator - Completed(But something like (2^2) - 1 )
 - Variables
 - Comparison and Logical Operators
 - IF statement
