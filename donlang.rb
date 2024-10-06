@@ -68,7 +68,6 @@ class RTError < Error
   end
 end
 
-
 ######################
 # POSITION
 #######################
@@ -92,7 +91,7 @@ class Position
       @ln += 1
       @col = 0
     end
-    self # return self for method chaining
+    self
   end
 
   def copy
@@ -112,7 +111,8 @@ TT_MUL    = 'MUL'
 TT_DIV    = 'DIV'
 TT_LPAREN = 'LPAREN'
 TT_RPAREN = 'RPAREN'
-TT_EOF = 'EOF'
+TT_POW    = 'POW'
+TT_EOF    = 'EOF'
 
 class Token
   attr_accessor :type, :value, :pos_start, :pos_end
@@ -180,6 +180,9 @@ class Lexer
       elsif @current_char == '/'
         tokens << Token.new(TT_DIV, nil, @pos)
         advance
+      elsif @current_char == '^'
+        tokens << Token.new(TT_POW, nil, @pos)
+        advance
       elsif @current_char == '('
         tokens << Token.new(TT_LPAREN, nil, @pos)
         advance
@@ -203,7 +206,6 @@ class Lexer
     dot_count = 0
     pos_start = @pos.copy
   
-    # Check for unary + or -
     if @current_char == '-' || @current_char == '+'
       num_str += @current_char
       advance
@@ -226,7 +228,6 @@ class Lexer
       Token.new(TT_FLOAT, num_str.to_f, pos_start, @pos)
     end
   end
-  
 end
 
 ##################
@@ -325,20 +326,22 @@ end
 #######################################
 
 class ParseResult
-  attr_accessor :error, :node
+  attr_accessor :error, :node, :advance_count
 
   def initialize
     @error = nil
     @node = nil
+    @advance_count = 0 # keeps track of the number of token advancements
+  end
+
+  def register_advancement
+    @advance_count += 1
   end
 
   def register(res)
-    if res.is_a?(ParseResult)
-      @error = res.error if res.error
-      return res.node
-    end
-
-    res
+    @advance_count += res.advance_count
+    @error = res.error if res.error
+    res.node
   end
 
   def success(node)
@@ -379,7 +382,7 @@ class Parser
     if !res.error && @current_tok.type != TT_EOF
       return res.failure(InvalidSyntaxError.new(
         @current_tok.pos_start, @current_tok.pos_end,
-        "Expected '+', '-', '*' or '/'"
+        "Expected '+', '-', '*', '/', or '^'"
       ))
     end  
     res
@@ -387,35 +390,77 @@ class Parser
 
   ###################################
 
-  def factor
+  def atom
     res = ParseResult.new
     tok = @current_tok
   
-    # Handle unary operators like -5 or +5
-    if [TT_PLUS, TT_MINUS].include?(tok.type)
-      op_tok = tok
-      res.register(advance)  # Move past the unary operator
-      factor_node = res.register(factor)  # Recursively parse the factor after the unary operator
-      if res.error
-        return res
-      end
-      return res.success(UnaryOpNode.new(op_tok, factor_node))  # Create a UnaryOpNode for the unary operation
+    if [TT_INT, TT_FLOAT].include?(tok.type)
+      res.register_advancement
+      advance
+      return res.success(NumberNode.new(tok))
   
-    # Handle numbers (INT or FLOAT)
-    elsif [TT_INT, TT_FLOAT].include?(tok.type)
-      res.register(advance)  # Move past the number
-      return res.success(NumberNode.new(tok))  # Return a NumberNode for the number
-  
-    # Handle parentheses (LPAREN and RPAREN)
     elsif tok.type == TT_LPAREN
-      res.register(advance)  # Move past '('
-      expr_node = res.register(expr)  # Parse the expression inside the parentheses
+      res.register_advancement
+      advance
+      expr = res.register(expr)
       if res.error
         return res
       end
   
       if @current_tok.type == TT_RPAREN
-        res.register(advance)  # Move past ')'
+        res.register_advancement
+        advance
+        return res.success(expr)
+      else
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected ')'"
+        ))
+      end
+    end
+  
+    return res.failure(InvalidSyntaxError.new(
+      tok.pos_start, tok.pos_end,
+      "Expected int, float, '+', '-', or '('"
+    ))
+  end
+  
+  
+  def power
+    bin_op(method(:atom), [TT_POW], method(:factor))
+  end
+  
+  
+  def factor
+    res = ParseResult.new
+    tok = @current_tok
+  
+    if [TT_PLUS, TT_MINUS].include?(tok.type)
+      op_tok = tok
+      res.register_advancement
+      advance
+      factor_node = res.register(factor)
+      if res.error
+        return res
+      end
+      return res.success(UnaryOpNode.new(op_tok, factor_node)) 
+  
+    elsif [TT_INT, TT_FLOAT].include?(tok.type)
+      res.register_advancement
+      advance
+      return res.success(NumberNode.new(tok)) 
+  
+    elsif tok.type == TT_LPAREN
+      res.register_advancement
+      advance
+      expr_node = res.register(expr)
+      if res.error
+        return res
+      end
+  
+      if @current_tok.type == TT_RPAREN
+        res.register_advancement
+        advance
         return res.success(expr_node)
       else
         return res.failure(InvalidSyntaxError.new(
@@ -430,8 +475,9 @@ class Parser
   end
   
   def term
-    bin_op(method(:factor), [TT_MUL, TT_DIV])
+    bin_op(method(:power), [TT_MUL, TT_DIV])
   end
+  
 
   def expr
     bin_op(method(:term), [TT_PLUS, TT_MINUS])
@@ -439,23 +485,24 @@ class Parser
 
   ###################################
 
-  def bin_op(func, ops)
+  def bin_op(func_a, ops, func_b = nil)
     res = ParseResult.new
-    left = res.register(func.call)
+    left = res.register(func_a.call)
     return res if res.error
-
+  
     while ops.include?(@current_tok.type)
       op_tok = @current_tok
-      res.register(advance)
-      right = res.register(func.call)
+      res.register_advancement
+      advance
+      right = res.register((func_b || func_a).call)
       return res if res.error
       left = BinOpNode.new(left, op_tok, right)
     end
-
+  
     res.success(left)
   end
+  
 end
-
 
 #Number
 
@@ -510,6 +557,13 @@ class Number
     end
   end
 
+  def powed_by(other)
+    if other.is_a?(Number)
+      return Number.new(@value ** other.value).set_context(@context), nil
+    end
+  end
+  
+
   def to_s
     @value.to_s
   end
@@ -532,7 +586,6 @@ class Context
     @parent_entry_pos = parent_entry_pos
   end
 end
-
 
 #######################################
 # Interpreter
@@ -564,10 +617,10 @@ class Interpreter
     res = RTResult.new
     left = res.register(visit(node.left_node, context))
     return res if res.error
-
+  
     right = res.register(visit(node.right_node, context))
     return res if res.error
-
+  
     result, error = case node.op_tok.type
                     when TT_PLUS
                       left.added_to(right)
@@ -577,14 +630,17 @@ class Interpreter
                       left.multed_by(right)
                     when TT_DIV
                       left.dived_by(right)
+                    when TT_POW
+                      left.powed_by(right)   # Handling the power operator
                     end
-
+  
     if error
       res.failure(error)
     else
       res.success(result.set_pos(node.pos_start, node.pos_end))
     end
   end
+  
 
   def visit_UnaryOpNode(node, context)
     res = RTResult.new
@@ -611,17 +667,14 @@ end
 
 class Basic
   def self.run(fn, text)
-    # Generate tokens
     lexer = Lexer.new(fn, text)
     tokens, error = lexer.make_tokens
     return nil, error if error
 
-    # Generate AST
     parser = Parser.new(tokens)
     ast = parser.parse
     return nil, ast.error if ast.error
 
-    # Run program
     interpreter = Interpreter.new
     context = Context.new('<program>')
     result = interpreter.visit(ast.node, context)
