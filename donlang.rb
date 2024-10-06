@@ -38,6 +38,37 @@ class InvalidSyntaxError < Error
   end
 end
 
+class RTError < Error
+  attr_accessor :context
+
+  def initialize(pos_start, pos_end, details, context)
+    super(pos_start, pos_end, 'Runtime Error', details)
+    @context = context
+  end
+
+  def as_string
+    result = generate_traceback
+    result += "#{@error_name}: #{@details}"
+    result += "\n\n" + string_with_arrows(@pos_start.ftxt, @pos_start, @pos_end)
+    result
+  end
+
+  def generate_traceback
+    result = ''
+    pos = @pos_start
+    ctx = @context
+
+    while ctx
+      result = "  File #{pos.fn}, line #{pos.ln + 1}, in #{ctx.display_name}\n" + result
+      pos = ctx.parent_entry_pos
+      ctx = ctx.parent
+    end
+
+    "Traceback (most recent call last):\n" + result
+  end
+end
+
+
 ######################
 # POSITION
 #######################
@@ -61,6 +92,7 @@ class Position
       @ln += 1
       @col = 0
     end
+    self # return self for method chaining
   end
 
   def copy
@@ -125,7 +157,6 @@ class Lexer
   def advance
     @pos.advance(@current_char)
     @current_char = @pos.idx < @text.length ? @text[@pos.idx] : nil
-    puts "Advanced to char: #{@current_char}"  # Debugging line
   end
   
 
@@ -199,13 +230,44 @@ class Lexer
 end
 
 ##################
+# Run Time Result
+##################
+
+class RTResult
+  attr_accessor :value, :error
+
+  def initialize
+    @value = nil
+    @error = nil
+  end
+
+  def register(res)
+    @error = res.error if res.error
+    res.value
+  end
+
+  def success(value)
+    @value = value
+    self
+  end
+
+  def failure(error)
+    @error = error
+    self
+  end
+end
+
+##################
 # Nodes
 ##################
+
 class NumberNode
-  attr_reader :tok
+  attr_reader :tok, :pos_start, :pos_end
 
   def initialize(tok)
     @tok = tok
+    @pos_start = @tok.pos_start
+    @pos_end = @tok.pos_end
   end
 
   def to_s
@@ -218,12 +280,15 @@ class NumberNode
 end
 
 class BinOpNode
-  attr_reader :left_node, :op_tok, :right_node
+  attr_reader :left_node, :op_tok, :right_node, :pos_start, :pos_end
 
   def initialize(left_node, op_tok, right_node)
     @left_node = left_node
     @op_tok = op_tok
     @right_node = right_node
+
+    @pos_start = @left_node.pos_start
+    @pos_end = @right_node.pos_end
   end
 
   def to_s
@@ -236,11 +301,14 @@ class BinOpNode
 end
 
 class UnaryOpNode
-  attr_reader :op_tok, :node
+  attr_reader :op_tok, :node, :pos_start, :pos_end
 
   def initialize(op_tok, node)
     @op_tok = op_tok
     @node = node
+
+    @pos_start = @op_tok.pos_start
+    @pos_end = @node.pos_end
   end
 
   def to_s
@@ -304,8 +372,6 @@ class Parser
     else
       @current_tok = Token.new(TT_EOF)
     end
-    puts "Current token: #{@current_tok}"  # Debugging line
-    @current_tok
   end
 
   def parse
@@ -324,8 +390,6 @@ class Parser
   def factor
     res = ParseResult.new
     tok = @current_tok
-  
-    puts "Current token in factor: #{tok}"  # Debugging output
   
     # Handle unary operators like -5 or +5
     if [TT_PLUS, TT_MINUS].include?(tok.type)
@@ -365,7 +429,6 @@ class Parser
     ))
   end
   
-
   def term
     bin_op(method(:factor), [TT_MUL, TT_DIV])
   end
@@ -393,23 +456,176 @@ class Parser
   end
 end
 
+
+#Number
+
+class Number
+  attr_accessor :value, :pos_start, :pos_end, :context
+
+  def initialize(value)
+    @value = value
+    set_pos
+    set_context
+  end
+
+  def set_pos(pos_start = nil, pos_end = nil)
+    @pos_start = pos_start
+    @pos_end = pos_end
+    self
+  end
+
+  def set_context(context = nil)
+    @context = context
+    self
+  end
+
+  def added_to(other)
+    if other.is_a?(Number)
+      return Number.new(@value + other.value).set_context(@context), nil
+    end
+  end
+
+  def subbed_by(other)
+    if other.is_a?(Number)
+      return Number.new(@value - other.value).set_context(@context), nil
+    end
+  end
+
+  def multed_by(other)
+    if other.is_a?(Number)
+      return Number.new(@value * other.value).set_context(@context), nil
+    end
+  end
+
+  def dived_by(other)
+    if other.is_a?(Number)
+      if other.value == 0
+        return nil, RTError.new(
+          other.pos_start, other.pos_end,
+          'Division by zero',
+          @context
+        )
+      end
+      return Number.new(@value / other.value).set_context(@context), nil
+    end
+  end
+
+  def to_s
+    @value.to_s
+  end
+
+  def inspect
+    to_s
+  end
+end
+
+################
+# Context
+####################
+
+class Context
+  attr_accessor :display_name, :parent, :parent_entry_pos
+
+  def initialize(display_name, parent = nil, parent_entry_pos = nil)
+    @display_name = display_name
+    @parent = parent
+    @parent_entry_pos = parent_entry_pos
+  end
+end
+
+
+#######################################
+# Interpreter
+#######################################
+
+class Interpreter
+  def visit(node, context)
+    method_name = "visit_#{node.class.name}"
+    if respond_to?(method_name)
+      return send(method_name, node, context)
+    else
+      return no_visit_method(node, context)
+    end
+  end
+
+  def no_visit_method(node, context)
+    raise "No visit_#{node.class.name} method defined"
+  end
+
+  ###################################
+
+  def visit_NumberNode(node, context)
+    RTResult.new.success(
+      Number.new(node.tok.value).set_context(context).set_pos(node.pos_start, node.pos_end)
+    )
+  end
+
+  def visit_BinOpNode(node, context)
+    res = RTResult.new
+    left = res.register(visit(node.left_node, context))
+    return res if res.error
+
+    right = res.register(visit(node.right_node, context))
+    return res if res.error
+
+    result, error = case node.op_tok.type
+                    when TT_PLUS
+                      left.added_to(right)
+                    when TT_MINUS
+                      left.subbed_by(right)
+                    when TT_MUL
+                      left.multed_by(right)
+                    when TT_DIV
+                      left.dived_by(right)
+                    end
+
+    if error
+      res.failure(error)
+    else
+      res.success(result.set_pos(node.pos_start, node.pos_end))
+    end
+  end
+
+  def visit_UnaryOpNode(node, context)
+    res = RTResult.new
+    number = res.register(visit(node.node, context))
+    return res if res.error
+
+    error = nil
+
+    if node.op_tok.type == TT_MINUS
+      number, error = number.multed_by(Number.new(-1))
+    end
+
+    if error
+      res.failure(error)
+    else
+      res.success(number.set_pos(node.pos_start, node.pos_end))
+    end
+  end
+end
+
 #######################################
 # RUN
 #######################################
 
-class Basic\
+class Basic
   def self.run(fn, text)
+    # Generate tokens
     lexer = Lexer.new(fn, text)
     tokens, error = lexer.make_tokens
     return nil, error if error
 
+    # Generate AST
     parser = Parser.new(tokens)
     ast = parser.parse
+    return nil, ast.error if ast.error
 
-    if ast.node && !ast.error
-      puts ast.node.to_s
-    end
+    # Run program
+    interpreter = Interpreter.new
+    context = Context.new('<program>')
+    result = interpreter.visit(ast.node, context)
 
-    return ast.node, ast.error
+    return result.value, result.error
   end
 end
