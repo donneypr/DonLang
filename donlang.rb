@@ -408,6 +408,10 @@ end
 # Parser
 #######################################
 
+#######################################
+# Parser
+#######################################
+
 class Parser
   attr_reader :tokens, :tok_idx, :current_tok
 
@@ -535,27 +539,31 @@ class Parser
       res.register_advancement
       advance
   
-      if @current_tok.type != TT_IDENTIFIER
-        return res.failure(InvalidSyntaxError.new(
-          @current_tok.pos_start, @current_tok.pos_end,
-          "Expected identifier"
-        ))
+      var_names = []
+  
+      # Collect all variables in the chain
+      while @current_tok.type == TT_IDENTIFIER
+        var_names << @current_tok
+        res.register_advancement
+        advance
+  
+        if @current_tok.type == TT_EQ
+          res.register_advancement
+          advance
+        else
+          return res.failure(InvalidSyntaxError.new(
+            @current_tok.pos_start, @current_tok.pos_end,
+            "Expected '='"
+          ))
+        end
+  
+        # If next token is not a variable, break out of loop
+        break unless @current_tok.matches(TT_KEYWORD, 'VAR')
+        res.register_advancement
+        advance
       end
   
-      var_name = @current_tok
-      res.register_advancement
-      advance
-  
-      if @current_tok.type != TT_EQ
-        return res.failure(InvalidSyntaxError.new(
-          @current_tok.pos_start, @current_tok.pos_end,
-          "Expected '='"
-        ))
-      end
-  
-      res.register_advancement
-      advance
-  
+      # Parse the final expression after the last '='
       expr = res.register(term)
       if res.error
         return res.failure(InvalidSyntaxError.new(
@@ -564,7 +572,13 @@ class Parser
         ))
       end
   
-      return res.success(VarAssignNode.new(var_name, expr))
+      # Assign the final expression to all variables in reverse order
+      var_assign_node = VarAssignNode.new(var_names.pop, expr)
+      while var_names.any?
+        var_assign_node = VarAssignNode.new(var_names.pop, var_assign_node)
+      end
+  
+      return res.success(var_assign_node)
     end
   
     node = res.register(bin_op(method(:term), [TT_PLUS, TT_MINUS]))
@@ -595,7 +609,9 @@ class Parser
   
     res.success(left)
   end
+  
 end
+
 
 # Number
 
