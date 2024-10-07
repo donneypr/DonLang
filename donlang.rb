@@ -5,6 +5,8 @@ require_relative 'strings_with_arrows'
 #######################################
 
 DIGITS = '0123456789'
+LETTERS = ('a'..'z').to_a.join + ('A'..'Z').to_a.join  
+LETTERS_DIGITS = LETTERS + DIGITS                      
 
 #######################################
 # ERRORS
@@ -113,6 +115,13 @@ TT_LPAREN = 'LPAREN'
 TT_RPAREN = 'RPAREN'
 TT_POW    = 'POW'
 TT_EOF    = 'EOF'
+TT_IDENTIFIER = 'IDENTIFIER'
+TT_KEYWORD = 'KEYWORD'
+TT_EQ = 'EQ'
+
+KEYWORDS = [
+  'VAR'
+]
 
 class Token
   attr_accessor :type, :value, :pos_start, :pos_end
@@ -130,6 +139,10 @@ class Token
     @pos_end = pos_end if pos_end
   end
 
+  def matches(type_, value)
+    @type == type_ && @value == value
+  end 
+  
   def to_s
     @value ? "#{@type}:#{@value}" : "#{@type}"
   end
@@ -158,7 +171,6 @@ class Lexer
     @pos.advance(@current_char)
     @current_char = @pos.idx < @text.length ? @text[@pos.idx] : nil
   end
-  
 
   def make_tokens
     tokens = []
@@ -168,6 +180,8 @@ class Lexer
         advance
       elsif DIGITS.include?(@current_char)
         tokens << make_number
+      elsif LETTERS.include?(@current_char)
+        tokens << make_identifier
       elsif @current_char == '+'
         tokens << Token.new(TT_PLUS, nil, @pos)
         advance
@@ -179,6 +193,9 @@ class Lexer
         advance
       elsif @current_char == '/'
         tokens << Token.new(TT_DIV, nil, @pos)
+        advance
+      elsif @current_char == '='
+        tokens << Token.new(TT_EQ, nil, @pos)
         advance
       elsif @current_char == '^'
         tokens << Token.new(TT_POW, nil, @pos)
@@ -205,28 +222,34 @@ class Lexer
     num_str = ''
     dot_count = 0
     pos_start = @pos.copy
-  
-    if @current_char == '-' || @current_char == '+'
-      num_str += @current_char
-      advance
-    end
-  
+
     while @current_char != nil && (DIGITS + '.').include?(@current_char)
       if @current_char == '.'
         break if dot_count == 1
         dot_count += 1
-        num_str += '.'
-      else
-        num_str += @current_char
       end
+      num_str += @current_char
       advance
     end
-  
+
     if dot_count == 0
       Token.new(TT_INT, num_str.to_i, pos_start, @pos)
     else
       Token.new(TT_FLOAT, num_str.to_f, pos_start, @pos)
     end
+  end
+
+  def make_identifier
+    id_str = ''
+    pos_start = @pos.copy
+  
+    while @current_char != nil && (LETTERS_DIGITS + '_').include?(@current_char)
+      id_str += @current_char
+      advance
+    end
+  
+    tok_type = KEYWORDS.include?(id_str) ? TT_KEYWORD : TT_IDENTIFIER
+    Token.new(tok_type, id_str, pos_start, @pos)
   end
 end
 
@@ -277,6 +300,28 @@ class NumberNode
 
   def inspect
     to_s
+  end
+end
+
+class VarAccessNode
+  attr_reader :var_name_tok, :pos_start, :pos_end
+
+  def initialize(var_name_tok)
+    @var_name_tok = var_name_tok
+    @pos_start = @var_name_tok.pos_start
+    @pos_end = @var_name_tok.pos_end
+  end
+end
+
+class VarAssignNode
+  attr_accessor :var_name_tok, :value_node, :pos_start, :pos_end
+
+  def initialize(var_name_tok, value_node)
+    @var_name_tok = var_name_tok
+    @value_node = value_node
+
+    @pos_start = @var_name_tok.pos_start
+    @pos_end = @value_node ? @value_node.pos_end : @var_name_tok.pos_end
   end
 end
 
@@ -331,7 +376,7 @@ class ParseResult
   def initialize
     @error = nil
     @node = nil
-    @advance_count = 0 # keeps track of the number of token advancements
+    @advance_count = 0
   end
 
   def register_advancement
@@ -339,9 +384,13 @@ class ParseResult
   end
 
   def register(res)
-    @advance_count += res.advance_count
-    @error = res.error if res.error
-    res.node
+    if res
+      @advance_count += res.advance_count
+      @error = res.error if res.error
+      res.node
+    else
+      nil
+    end
   end
 
   def success(node)
@@ -388,8 +437,6 @@ class Parser
     res
   end
 
-  ###################################
-
   def atom
     res = ParseResult.new
     tok = @current_tok
@@ -398,6 +445,11 @@ class Parser
       res.register_advancement
       advance
       return res.success(NumberNode.new(tok))
+  
+    elsif tok.type == TT_IDENTIFIER
+      res.register_advancement
+      advance
+      return res.success(VarAccessNode.new(tok))
   
     elsif tok.type == TT_LPAREN
       res.register_advancement
@@ -421,15 +473,13 @@ class Parser
   
     return res.failure(InvalidSyntaxError.new(
       tok.pos_start, tok.pos_end,
-      "Expected int, float, '+', '-', or '('"
+      "Expected int, float, identifier, '+', '-', or '('"
     ))
   end
-  
   
   def power
     bin_op(method(:atom), [TT_POW], method(:factor))
   end
-  
   
   def factor
     res = ParseResult.new
@@ -478,12 +528,56 @@ class Parser
     bin_op(method(:power), [TT_MUL, TT_DIV])
   end
   
-
   def expr
-    bin_op(method(:term), [TT_PLUS, TT_MINUS])
+    res = ParseResult.new
+  
+    if @current_tok.matches(TT_KEYWORD, 'VAR')
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_IDENTIFIER
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected identifier"
+        ))
+      end
+  
+      var_name = @current_tok
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_EQ
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected '='"
+        ))
+      end
+  
+      res.register_advancement
+      advance
+  
+      expr = res.register(term)
+      if res.error
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected a valid expression after '='"
+        ))
+      end
+  
+      return res.success(VarAssignNode.new(var_name, expr))
+    end
+  
+    node = res.register(bin_op(method(:term), [TT_PLUS, TT_MINUS]))
+  
+    if res.error
+      return res.failure(InvalidSyntaxError.new(
+        @current_tok.pos_start, @current_tok.pos_end,
+        "Expected 'VAR', int, float, identifier, '+', '-' or '('"
+      ))
+    end
+  
+    res.success(node)
   end
-
-  ###################################
 
   def bin_op(func_a, ops, func_b = nil)
     res = ParseResult.new
@@ -501,10 +595,9 @@ class Parser
   
     res.success(left)
   end
-  
 end
 
-#Number
+# Number
 
 class Number
   attr_accessor :value, :pos_start, :pos_end, :context
@@ -562,7 +655,10 @@ class Number
       return Number.new(@value ** other.value).set_context(@context), nil
     end
   end
-  
+
+  def copy
+    Number.new(@value).set_pos(@pos_start, @pos_end).set_context(@context)
+  end
 
   def to_s
     @value.to_s
@@ -578,12 +674,40 @@ end
 ####################
 
 class Context
-  attr_accessor :display_name, :parent, :parent_entry_pos
+  attr_accessor :display_name, :parent, :parent_entry_pos, :symbol_table
 
   def initialize(display_name, parent = nil, parent_entry_pos = nil)
     @display_name = display_name
     @parent = parent
     @parent_entry_pos = parent_entry_pos
+    @symbol_table = nil  
+  end
+end
+
+#################
+# Symbol Table
+#####################
+
+class SymbolTable
+  attr_accessor :symbols, :parent
+
+  def initialize
+    @symbols = {}
+    @parent = nil
+  end
+
+  def get(name)
+    value = @symbols[name]
+    return @parent.get(name) if value.nil? && @parent
+    value
+  end
+
+  def set(name, value)
+    @symbols[name] = value
+  end
+
+  def remove(name)
+    @symbols.delete(name)
   end
 end
 
@@ -605,12 +729,37 @@ class Interpreter
     raise "No visit_#{node.class.name} method defined"
   end
 
-  ###################################
-
   def visit_NumberNode(node, context)
     RTResult.new.success(
       Number.new(node.tok.value).set_context(context).set_pos(node.pos_start, node.pos_end)
     )
+  end
+
+  def visit_VarAccessNode(node, context)
+    res = RTResult.new
+    var_name = node.var_name_tok.value
+    value = context.symbol_table.get(var_name)
+  
+    if value.nil?
+      return res.failure(RTError.new(
+        node.pos_start, node.pos_end,
+        "'#{var_name}' is not defined",
+        context
+      ))
+    end
+  
+    value = value.copy.set_pos(node.pos_start, node.pos_end)
+    res.success(value)
+  end
+
+  def visit_VarAssignNode(node, context)
+    res = RTResult.new
+    var_name = node.var_name_tok.value
+    value = res.register(visit(node.value_node, context))
+    return res if res.error
+  
+    context.symbol_table.set(var_name, value)
+    res.success(value)
   end
 
   def visit_BinOpNode(node, context)
@@ -631,7 +780,7 @@ class Interpreter
                     when TT_DIV
                       left.dived_by(right)
                     when TT_POW
-                      left.powed_by(right)   # Handling the power operator
+                      left.powed_by(right)
                     end
   
     if error
@@ -640,7 +789,6 @@ class Interpreter
       res.success(result.set_pos(node.pos_start, node.pos_end))
     end
   end
-  
 
   def visit_UnaryOpNode(node, context)
     res = RTResult.new
@@ -665,6 +813,9 @@ end
 # RUN
 #######################################
 
+$global_symbol_table = SymbolTable.new
+$global_symbol_table.set("null", Number.new(0))
+
 class Basic
   def self.run(fn, text)
     lexer = Lexer.new(fn, text)
@@ -677,6 +828,7 @@ class Basic
 
     interpreter = Interpreter.new
     context = Context.new('<program>')
+    context.symbol_table = $global_symbol_table
     result = interpreter.visit(ast.node, context)
 
     return result.value, result.error
