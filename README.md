@@ -5,8 +5,8 @@ Using this
 - Lexer - Completed
 - Parser - Completed
 - Interpreter - Completed
-- Power Operator - Completed(But something like (2^2) - 1 )
-- Variables
+- Power Operator - Completed
+- Variables - Completed(Doesn't do 5 + (VAR x = 6) though)
 - Comparison and Logical Operators
 - IF statement
 - For and While statements
