@@ -40,6 +40,12 @@ class InvalidSyntaxError < Error
   end
 end
 
+class ExpectedCharError < Error
+  def initialize(pos_start, pos_end, details)
+    super(pos_start, pos_end, 'Expected Character', details)
+  end
+end
+
 class RTError < Error
   attr_accessor :context
 
@@ -268,6 +274,58 @@ class Lexer
     tok_type = KEYWORDS.include?(id_str) ? TT_KEYWORD : TT_IDENTIFIER
     Token.new(tok_type, id_str, pos_start, @pos)
   end
+
+  def make_not_equals
+    pos_start = @pos.dup
+    advance
+  
+    if @current_char == '='
+      advance
+      return Token.new(TT_NE, pos_start: pos_start, pos_end: @pos), nil
+    end
+  
+    advance
+    return nil, ExpectedCharError.new(pos_start, @pos, "'=' (after '!')")
+  end
+  
+  def make_equals
+    tok_type = TT_EQ
+    pos_start = @pos.dup
+    advance
+  
+    if @current_char == '='
+      advance
+      tok_type = TT_EE
+    end
+  
+    Token.new(tok_type, pos_start: pos_start, pos_end: @pos)
+  end
+  
+  def make_less_than
+    tok_type = TT_LT
+    pos_start = @pos.dup
+    advance
+  
+    if @current_char == '='
+      advance
+      tok_type = TT_LTE
+    end
+  
+    Token.new(tok_type, pos_start: pos_start, pos_end: @pos)
+  end
+  
+  def make_greater_than
+    tok_type = TT_GT
+    pos_start = @pos.dup
+    advance
+  
+    if @current_char == '='
+      advance
+      tok_type = TT_GTE
+    end
+  
+    Token.new(tok_type, pos_start: pos_start, pos_end: @pos)
+  end
 end
 
 ##################
@@ -420,10 +478,6 @@ class ParseResult
     self
   end
 end
-
-#######################################
-# Parser
-#######################################
 
 #######################################
 # Parser
@@ -582,81 +636,93 @@ class Parser
     bin_op(method(:power), [TT_MUL, TT_DIV])
   end
   
- def expr
-  res = ParseResult.new
-
-  # Check if the current token is a 'VAR' declaration
-  if @current_tok.matches(TT_KEYWORD, 'VAR')
-    res.register_advancement
-    advance
-
-    var_names = []
-
-    # Collect all variables in the chain
-    while @current_tok.type == TT_IDENTIFIER
-      var_names << @current_tok
+  def arith_expr
+    bin_op(method(:term), [TT_PLUS, TT_MINUS])
+  end
+  
+  def comp_expr
+    res = ParseResult.new
+  
+    if @current_tok.matches(TT_KEYWORD, 'NOT')
+      op_tok = @current_tok
       res.register_advancement
       advance
+  
+      node = res.register(comp_expr)
+      return res if res.error
+      return res.success(UnaryOpNode.new(op_tok, node))
+    end
+  
+    node = res.register(bin_op(method(:arith_expr), [TT_EE, TT_NE, TT_LT, TT_GT, TT_LTE, TT_GTE]))
+  
+    if res.error
+      return res.failure(InvalidSyntaxError.new(
+        @current_tok.pos_start, @current_tok.pos_end,
+        "Expected int, float, identifier, '+', '-', '(' or 'NOT'"
+      ))
+    end
+  
+    res.success(node)
+  end
 
-      if @current_tok.type == TT_EQ
-        res.register_advancement
-        advance
-      else
+  def expr
+    res = ParseResult.new
+  
+    if @current_tok.matches(TT_KEYWORD, 'VAR')
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_IDENTIFIER
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected identifier"
+        ))
+      end
+  
+      var_name = @current_tok
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_EQ
         return res.failure(InvalidSyntaxError.new(
           @current_tok.pos_start, @current_tok.pos_end,
           "Expected '='"
         ))
       end
-
-      # Continue if we encounter another 'VAR' keyword
-      if @current_tok.matches(TT_KEYWORD, 'VAR')
-        res.register_advancement
-        advance
-      end
+  
+      res.register_advancement
+      advance
+      expr = res.register(expr)
+      return res if res.error
+      return res.success(VarAssignNode.new(var_name, expr))
     end
-
-    # Parse the final expression after the last '='
-    expr = res.register(term)
+  
+    node = res.register(bin_op(method(:comp_expr), [[TT_KEYWORD, 'AND'], [TT_KEYWORD, 'OR']]))
+  
     if res.error
       return res.failure(InvalidSyntaxError.new(
         @current_tok.pos_start, @current_tok.pos_end,
-        "Expected a valid expression after '='"
+        "Expected 'VAR', int, float, identifier, '+', '-', '(' or 'NOT'"
       ))
     end
-
-    # Assign the final expression to all variables in reverse order
-    var_assign_node = VarAssignNode.new(var_names.pop, expr)
-    while var_names.any?
-      var_assign_node = VarAssignNode.new(var_names.pop, var_assign_node)
-    end
-
-    return res.success(var_assign_node)
+  
+    res.success(node)
   end
-
-  # Continue parsing the rest of the expression
-  node = res.register(bin_op(method(:term), [TT_PLUS, TT_MINUS]))
-
-  if res.error
-    return res.failure(InvalidSyntaxError.new(
-      @current_tok.pos_start, @current_tok.pos_end,
-      "Expected 'VAR', int, float, identifier, '+', '-' or '('"
-    ))
-  end
-
-  res.success(node)
-end
+  
 
 
   def bin_op(func_a, ops, func_b = nil)
+    func_b ||= func_a  # Set func_b to func_a if it is nil
+  
     res = ParseResult.new
     left = res.register(func_a.call)
     return res if res.error
   
-    while ops.include?(@current_tok.type)
+    while ops.include?(@current_tok.type) || ops.include?([@current_tok.type, @current_tok.value])
       op_tok = @current_tok
       res.register_advancement
       advance
-      right = res.register((func_b || func_a).call)
+      right = res.register(func_b.call)
       return res if res.error
       left = BinOpNode.new(left, op_tok, right)
     end
@@ -723,6 +789,58 @@ class Number
     if other.is_a?(Number)
       return Number.new(@value ** other.value).set_context(@context), nil
     end
+  end
+
+  def get_comparison_eq(other)
+    if other.is_a?(Number)
+      return Number.new((@value == other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def get_comparison_ne(other)
+    if other.is_a?(Number)
+      return Number.new((@value != other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def get_comparison_lt(other)
+    if other.is_a?(Number)
+      return Number.new((@value < other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def get_comparison_gt(other)
+    if other.is_a?(Number)
+      return Number.new((@value > other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def get_comparison_lte(other)
+    if other.is_a?(Number)
+      return Number.new((@value <= other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def get_comparison_gte(other)
+    if other.is_a?(Number)
+      return Number.new((@value >= other.value ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def anded_by(other)
+    if other.is_a?(Number)
+      return Number.new((@value != 0 && other.value != 0 ? 1 : 0)).set_context(@context), nil
+    end
+  end
+  
+  def ored_by(other)
+    if other.is_a?(Number)
+      return Number.new((@value != 0 || other.value != 0 ? 1 : 0)).set_context(@context), nil
+    end
+  end
+
+  def notted
+    return (Number.new(@value == 0 ? 1 : 0).set_context(@context)), nil
   end
 
   def copy
@@ -850,6 +968,24 @@ class Interpreter
                       left.dived_by(right)
                     when TT_POW
                       left.powed_by(right)
+                    when TT_EE
+                      left.get_comparison_eq(right)
+                    when TT_NE
+                      left.get_comparison_ne(right)
+                    when TT_LT
+                      left.get_comparison_lt(right)
+                    when TT_GT
+                      left.get_comparison_gt(right)
+                    when TT_LTE
+                      left.get_comparison_lte(right)
+                    when TT_GTE
+                      left.get_comparison_gte(right)
+                    else
+                      if node.op_tok.matches(TT_KEYWORD, 'AND')
+                        left.anded_by(right)
+                      elsif node.op_tok.matches(TT_KEYWORD, 'OR')
+                        left.ored_by(right)
+                      end
                     end
   
     if error
@@ -863,13 +999,15 @@ class Interpreter
     res = RTResult.new
     number = res.register(visit(node.node, context))
     return res if res.error
-
+  
     error = nil
-
+  
     if node.op_tok.type == TT_MINUS
       number, error = number.multed_by(Number.new(-1))
+    elsif node.op_tok.matches(TT_KEYWORD, 'NOT')
+      number, error = number.notted
     end
-
+  
     if error
       res.failure(error)
     else
@@ -883,8 +1021,9 @@ end
 #######################################
 
 $global_symbol_table = SymbolTable.new
-$global_symbol_table.set("null", Number.new(0))
-
+$global_symbol_table.set("NULL", Number.new(0))
+$global_symbol_table.set("FALSE", Number.new(0))
+$global_symbol_table.set("TRUE", Number.new(1))
 class Basic
   def self.run(fn, text)
     lexer = Lexer.new(fn, text)
