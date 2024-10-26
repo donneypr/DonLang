@@ -7,7 +7,7 @@ Using this
 - Interpreter - Completed
 - Power Operator - Completed
 - Variables - Completed(Doesn't do 5 + (VAR x = 6) though)
-- Comparison and Logical Operators
+- Comparison and Logical Operators - Completed 
 - IF statement
 - For and While statements
 - Functions
