@@ -118,9 +118,18 @@ TT_EOF    = 'EOF'
 TT_IDENTIFIER = 'IDENTIFIER'
 TT_KEYWORD = 'KEYWORD'
 TT_EQ = 'EQ'
+TT_EE	= 'EE' 
+TT_NE	= 'NE' 
+TT_LT	= 'LT' 
+TT_GT	= 'GT' 
+TT_LTE = 'LTE' 
+TT_GTE = 'GTE' 
 
 KEYWORDS = [
-  'VAR'
+  'VAR',
+  'AND',
+  'OR',
+  'NOT'
 ]
 
 class Token
@@ -174,49 +183,57 @@ class Lexer
 
   def make_tokens
     tokens = []
-
-    while @current_char != nil
-      if ' \t'.include?(@current_char)
+  
+    while !@current_char.nil?
+      if [' ', "\t"].include?(@current_char)
         advance
       elsif DIGITS.include?(@current_char)
         tokens << make_number
       elsif LETTERS.include?(@current_char)
         tokens << make_identifier
       elsif @current_char == '+'
-        tokens << Token.new(TT_PLUS, nil, @pos)
+        tokens << Token.new(TT_PLUS, pos_start: @pos)
         advance
       elsif @current_char == '-'
-        tokens << Token.new(TT_MINUS, nil, @pos)
+        tokens << Token.new(TT_MINUS, pos_start: @pos)
         advance
       elsif @current_char == '*'
-        tokens << Token.new(TT_MUL, nil, @pos)
+        tokens << Token.new(TT_MUL, pos_start: @pos)
         advance
       elsif @current_char == '/'
-        tokens << Token.new(TT_DIV, nil, @pos)
-        advance
-      elsif @current_char == '='
-        tokens << Token.new(TT_EQ, nil, @pos)
+        tokens << Token.new(TT_DIV, pos_start: @pos)
         advance
       elsif @current_char == '^'
-        tokens << Token.new(TT_POW, nil, @pos)
+        tokens << Token.new(TT_POW, pos_start: @pos)
         advance
       elsif @current_char == '('
-        tokens << Token.new(TT_LPAREN, nil, @pos)
+        tokens << Token.new(TT_LPAREN, pos_start: @pos)
         advance
       elsif @current_char == ')'
-        tokens << Token.new(TT_RPAREN, nil, @pos)
+        tokens << Token.new(TT_RPAREN, pos_start: @pos)
         advance
+      elsif @current_char == '!'
+        token, error = make_not_equals
+        return [], error if error
+        tokens << token
+      elsif @current_char == '='
+        tokens << make_equals
+      elsif @current_char == '<'
+        tokens << make_less_than
+      elsif @current_char == '>'
+        tokens << make_greater_than
       else
-        pos_start = @pos.copy
+        pos_start = @pos.dup
         char = @current_char
         advance
         return [], IllegalCharError.new(pos_start, @pos, "'#{char}'")
       end
     end
-
-    tokens << Token.new(TT_EOF, nil, @pos)
-    return tokens, nil
+  
+    tokens << Token.new(TT_EOF, pos_start: @pos)
+    [tokens, nil]
   end
+  
 
   def make_number
     num_str = ''
@@ -473,6 +490,39 @@ class Parser
           "Expected ')'"
         ))
       end
+  
+    elsif @current_tok.matches(TT_KEYWORD, 'VAR')
+      # Handle variable assignment inside expressions
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_IDENTIFIER
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected identifier after 'VAR'"
+        ))
+      end
+  
+      var_name = @current_tok
+      res.register_advancement
+      advance
+  
+      if @current_tok.type != TT_EQ
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected '='"
+        ))
+      end
+  
+      res.register_advancement
+      advance
+  
+      expr = res.register(expr)
+      if res.error
+        return res
+      end
+  
+      return res.success(VarAssignNode.new(var_name, expr))
     end
   
     return res.failure(InvalidSyntaxError.new(
@@ -532,66 +582,70 @@ class Parser
     bin_op(method(:power), [TT_MUL, TT_DIV])
   end
   
-  def expr
-    res = ParseResult.new
-  
-    if @current_tok.matches(TT_KEYWORD, 'VAR')
+ def expr
+  res = ParseResult.new
+
+  # Check if the current token is a 'VAR' declaration
+  if @current_tok.matches(TT_KEYWORD, 'VAR')
+    res.register_advancement
+    advance
+
+    var_names = []
+
+    # Collect all variables in the chain
+    while @current_tok.type == TT_IDENTIFIER
+      var_names << @current_tok
       res.register_advancement
       advance
-  
-      var_names = []
-  
-      # Collect all variables in the chain
-      while @current_tok.type == TT_IDENTIFIER
-        var_names << @current_tok
+
+      if @current_tok.type == TT_EQ
         res.register_advancement
         advance
-  
-        if @current_tok.type == TT_EQ
-          res.register_advancement
-          advance
-        else
-          return res.failure(InvalidSyntaxError.new(
-            @current_tok.pos_start, @current_tok.pos_end,
-            "Expected '='"
-          ))
-        end
-  
-        # If next token is not a variable, break out of loop
-        break unless @current_tok.matches(TT_KEYWORD, 'VAR')
-        res.register_advancement
-        advance
-      end
-  
-      # Parse the final expression after the last '='
-      expr = res.register(term)
-      if res.error
+      else
         return res.failure(InvalidSyntaxError.new(
           @current_tok.pos_start, @current_tok.pos_end,
-          "Expected a valid expression after '='"
+          "Expected '='"
         ))
       end
-  
-      # Assign the final expression to all variables in reverse order
-      var_assign_node = VarAssignNode.new(var_names.pop, expr)
-      while var_names.any?
-        var_assign_node = VarAssignNode.new(var_names.pop, var_assign_node)
+
+      # Continue if we encounter another 'VAR' keyword
+      if @current_tok.matches(TT_KEYWORD, 'VAR')
+        res.register_advancement
+        advance
       end
-  
-      return res.success(var_assign_node)
     end
-  
-    node = res.register(bin_op(method(:term), [TT_PLUS, TT_MINUS]))
-  
+
+    # Parse the final expression after the last '='
+    expr = res.register(term)
     if res.error
       return res.failure(InvalidSyntaxError.new(
         @current_tok.pos_start, @current_tok.pos_end,
-        "Expected 'VAR', int, float, identifier, '+', '-' or '('"
+        "Expected a valid expression after '='"
       ))
     end
-  
-    res.success(node)
+
+    # Assign the final expression to all variables in reverse order
+    var_assign_node = VarAssignNode.new(var_names.pop, expr)
+    while var_names.any?
+      var_assign_node = VarAssignNode.new(var_names.pop, var_assign_node)
+    end
+
+    return res.success(var_assign_node)
   end
+
+  # Continue parsing the rest of the expression
+  node = res.register(bin_op(method(:term), [TT_PLUS, TT_MINUS]))
+
+  if res.error
+    return res.failure(InvalidSyntaxError.new(
+      @current_tok.pos_start, @current_tok.pos_end,
+      "Expected 'VAR', int, float, identifier, '+', '-' or '('"
+    ))
+  end
+
+  res.success(node)
+end
+
 
   def bin_op(func_a, ops, func_b = nil)
     res = ParseResult.new
@@ -609,7 +663,6 @@ class Parser
   
     res.success(left)
   end
-  
 end
 
 
