@@ -139,7 +139,7 @@ KEYWORDS = [
   'IF',
   'THEN',
   'ELIF',
-  "ELSE"
+  'ELSE'
 ]
 
 class Token
