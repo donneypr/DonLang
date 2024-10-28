@@ -135,7 +135,11 @@ KEYWORDS = [
   'VAR',
   'AND',
   'OR',
-  'NOT'
+  'NOT',
+  'IF',
+  'THEN',
+  'ELIF',
+  "ELSE"
 ]
 
 class Token
