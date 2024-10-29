@@ -8,7 +8,7 @@ Using this
 - Power Operator - Completed
 - Variables - Completed(Doesn't do 5 + (VAR x = 6) though)
 - Comparison and Logical Operators - Completed 
-- IF statement
+- IF statement - Completed
 - For and While statements
 - Functions
 - Strings
