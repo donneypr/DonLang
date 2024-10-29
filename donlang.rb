@@ -445,6 +445,19 @@ class UnaryOpNode
   end
 end
 
+class IfNode
+  attr_reader :cases, :else_case, :pos_start, :pos_end
+
+  def initialize(cases, else_case)
+    @cases = cases
+    @else_case = else_case
+
+    @pos_start = @cases[0][0].pos_start
+    @pos_end = (@else_case || @cases[@cases.length - 1][0]).pos_end
+  end
+end
+
+
 #######################################
 # ParseResult
 #######################################
@@ -516,6 +529,81 @@ class Parser
     res
   end
 
+  def if_expr
+    res = ParseResult.new
+    cases = []
+    else_case = nil
+  
+    # Expect an 'IF' keyword
+    unless @current_tok.matches(TT_KEYWORD, 'IF')
+      return res.failure(InvalidSyntaxError.new(
+        @current_tok.pos_start, @current_tok.pos_end,
+        "Expected 'IF'"
+      ))
+    end
+  
+    res.register_advancement
+    advance
+  
+    # Parse the initial 'IF' condition
+    condition = res.register(comp_expr)
+    return res if res.error
+  
+    # Expect the 'THEN' keyword following the condition
+    unless @current_tok.matches(TT_KEYWORD, 'THEN')
+      return res.failure(InvalidSyntaxError.new(
+        @current_tok.pos_start, @current_tok.pos_end,
+        "Expected 'THEN'"
+      ))
+    end
+  
+    res.register_advancement
+    advance
+  
+    # Parse the expression that follows 'THEN'
+    then_expr = res.register(expr)
+    return res if res.error
+    cases << [condition, then_expr]
+  
+    # Parse optional 'ELIF' clauses
+    while @current_tok.matches(TT_KEYWORD, 'ELIF')
+      res.register_advancement
+      advance
+  
+      # Parse 'ELIF' condition
+      condition = res.register(comp_expr)
+      return res if res.error
+  
+      # Expect 'THEN' after the 'ELIF' condition
+      unless @current_tok.matches(TT_KEYWORD, 'THEN')
+        return res.failure(InvalidSyntaxError.new(
+          @current_tok.pos_start, @current_tok.pos_end,
+          "Expected 'THEN' after 'ELIF' condition"
+        ))
+      end
+  
+      res.register_advancement
+      advance
+  
+      # Parse the expression after 'THEN' in 'ELIF' clause
+      then_expr = res.register(expr)
+      return res if res.error
+      cases << [condition, then_expr]
+    end
+  
+    # Parse optional 'ELSE' clause
+    if @current_tok.matches(TT_KEYWORD, 'ELSE')
+      res.register_advancement
+      advance
+  
+      # Parse the expression for the 'ELSE' clause
+      else_case = res.register(expr)
+      return res if res.error
+    end
+  
+    # Return the successfully parsed IfNode with all cases and the optional else_case
+    res.success(IfNode.new(cases, else_case))
+  end
   def atom
     res = ParseResult.new
     tok = @current_tok
@@ -549,7 +637,12 @@ class Parser
         ))
       end
   
-    elsif @current_tok.matches(TT_KEYWORD, 'VAR')
+    elsif tok.matches(TT_KEYWORD, 'IF')
+      if_expr = res.register(if_expr)
+      return res if res.error
+      return res.success(if_expr)
+  
+    elsif tok.matches(TT_KEYWORD, 'VAR')
       # Handle variable assignment inside expressions
       res.register_advancement
       advance
@@ -583,11 +676,13 @@ class Parser
       return res.success(VarAssignNode.new(var_name, expr))
     end
   
-    return res.failure(InvalidSyntaxError.new(
+    # Error handling if no valid token is found
+    res.failure(InvalidSyntaxError.new(
       tok.pos_start, tok.pos_end,
       "Expected int, float, identifier, '+', '-', or '('"
     ))
   end
+  
   
   def power
     bin_op(method(:atom), [TT_POW], method(:factor))
@@ -672,10 +767,19 @@ class Parser
   def expr
     res = ParseResult.new
   
+    # Handle 'IF' expressions at the top level or within assignments
+    if @current_tok.matches(TT_KEYWORD, 'IF')
+      if_expr_node = res.register(if_expr)
+      return res if res.error
+      return res.success(if_expr_node)
+    end
+  
+    # Handle 'VAR' keyword for variable assignment
     if @current_tok.matches(TT_KEYWORD, 'VAR')
       res.register_advancement
       advance
   
+      # Expect identifier after 'VAR'
       if @current_tok.type != TT_IDENTIFIER
         return res.failure(InvalidSyntaxError.new(
           @current_tok.pos_start, @current_tok.pos_end,
@@ -687,6 +791,7 @@ class Parser
       res.register_advancement
       advance
   
+      # Expect '=' after the identifier
       if @current_tok.type != TT_EQ
         return res.failure(InvalidSyntaxError.new(
           @current_tok.pos_start, @current_tok.pos_end,
@@ -696,25 +801,27 @@ class Parser
   
       res.register_advancement
       advance
-      expr = res.register(expr)
+  
+      # Parse the right-hand side expression, allowing complex expressions like IF
+      assigned_expr = res.register(expr)  # Reuse expr to handle any expression
       return res if res.error
-      return res.success(VarAssignNode.new(var_name, expr))
+  
+      return res.success(VarAssignNode.new(var_name, assigned_expr))
     end
   
+    # Handle logical expressions with 'AND' and 'OR'
     node = res.register(bin_op(method(:comp_expr), [[TT_KEYWORD, 'AND'], [TT_KEYWORD, 'OR']]))
-  
     if res.error
       return res.failure(InvalidSyntaxError.new(
         @current_tok.pos_start, @current_tok.pos_end,
-        "Expected 'VAR', int, float, identifier, '+', '-', '(' or 'NOT'"
+        "Expected 'VAR', 'IF', int, float, identifier, '+', '-', '(' or 'NOT'"
       ))
     end
   
     res.success(node)
   end
   
-
-
+  
   def bin_op(func_a, ops, func_b = nil)
     func_b ||= func_a  # Set func_b to func_a if it is nil
   
@@ -858,6 +965,11 @@ class Number
   def inspect
     to_s
   end
+
+  def is_true?
+    @value != 0
+  end
+
 end
 
 ################
@@ -1018,6 +1130,31 @@ class Interpreter
       res.success(number.set_pos(node.pos_start, node.pos_end))
     end
   end
+
+  def visit_IfNode(node, context)
+    res = RTResult.new
+  
+    node.cases.each do |condition, expr|
+      condition_value = res.register(visit(condition, context))
+      return res if res.error
+  
+      if condition_value.is_true?
+        expr_value = res.register(visit(expr, context))
+        return res if res.error
+        return res.success(expr_value)
+      end
+    end
+  
+    if node.else_case
+      else_value = res.register(visit(node.else_case, context))
+      return res if res.error
+      return res.success(else_value)
+    end
+  
+    res.success(nil)
+  end
+  
+
 end
 
 #######################################

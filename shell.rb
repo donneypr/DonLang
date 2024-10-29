@@ -8,13 +8,13 @@ loop do
   # Skip if the input is empty
   next if text.strip.empty?
 
-  # Call the run method from donlang class
+  # Call the run method from the Basic class
   result, error = Basic.run('<stdin>', text)
 
   if error
     puts error.as_string
-  else
-    # Print the result if no error occurred
-    puts result
+  elsif result
+    # Print the result if no error occurred and there's a result
+    puts result.to_s
   end
 end
